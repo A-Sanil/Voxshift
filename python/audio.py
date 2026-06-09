@@ -1,9 +1,9 @@
 from __future__ import annotations
-import asyncio
 import threading
 import time
 import numpy as np
 from typing import Optional, Callable, TYPE_CHECKING
+from collections import deque
 
 if TYPE_CHECKING:
     pass
@@ -19,12 +19,6 @@ try:
     TORCH_AVAILABLE = True
 except Exception:
     TORCH_AVAILABLE = False
-
-try:
-    from scipy.signal import resample, lfilter, firwin
-    SCIPY_AVAILABLE = True
-except Exception:
-    SCIPY_AVAILABLE = False
 
 
 def list_input_devices() -> list[dict]:
@@ -63,11 +57,116 @@ def list_output_devices() -> list[dict]:
     return devices
 
 
+# ── Phase vocoder pitch shifter ──────────────────────────────────────────────
+
+class PitchShifter:
+    """
+    Real-time phase-vocoder pitch shifter using overlap-add.
+    Much cleaner than resampling — no chipmunk/rasping artifacts.
+    """
+
+    def __init__(self, fft_size: int = 2048, hop_size: int = 512) -> None:
+        self.fft_size = fft_size
+        self.hop_size = hop_size
+        self.window = np.hanning(fft_size).astype(np.float32)
+        self._in_buf = np.zeros(fft_size, dtype=np.float32)
+        self._out_buf = np.zeros(fft_size * 2, dtype=np.float32)
+        self._out_pos = 0
+        self._prev_phase = np.zeros(fft_size // 2 + 1, dtype=np.float64)
+        self._sum_phase = np.zeros(fft_size // 2 + 1, dtype=np.float64)
+        self._expected_phase_diff = 2.0 * np.pi * hop_size / fft_size * np.arange(fft_size // 2 + 1)
+
+    def process(self, audio: np.ndarray, semitones: float) -> np.ndarray:
+        """Pitch-shift a buffer of audio by the given number of semitones."""
+        if semitones == 0:
+            return audio
+
+        shift_ratio = 2.0 ** (semitones / 12.0)
+        output = np.zeros(len(audio), dtype=np.float32)
+        pos = 0
+
+        while pos + self.fft_size <= len(audio) + self.fft_size:
+            # Fill input buffer
+            chunk_start = pos - self.fft_size + self.hop_size
+            if chunk_start < 0:
+                frame = np.zeros(self.fft_size, dtype=np.float32)
+                valid_start = max(0, chunk_start + self.fft_size - self.hop_size)
+                copy_len = min(len(audio) - max(0, chunk_start), self.fft_size)
+                src_start = max(0, chunk_start)
+                if src_start < len(audio) and copy_len > 0:
+                    actual = min(copy_len, len(audio) - src_start, self.fft_size)
+                    frame[self.fft_size - actual:] = audio[src_start:src_start + actual]
+            else:
+                end = min(chunk_start + self.fft_size, len(audio))
+                if end - chunk_start < self.fft_size:
+                    frame = np.zeros(self.fft_size, dtype=np.float32)
+                    frame[:end - chunk_start] = audio[chunk_start:end]
+                else:
+                    frame = audio[chunk_start:end].copy()
+
+            # Window and FFT
+            windowed = frame * self.window
+            spectrum = np.fft.rfft(windowed)
+            magnitude = np.abs(spectrum)
+            phase = np.angle(spectrum)
+
+            # Phase difference
+            phase_diff = phase - self._prev_phase
+            self._prev_phase = phase.copy()
+
+            # Subtract expected phase advance
+            phase_diff -= self._expected_phase_diff
+            # Wrap to [-pi, pi]
+            phase_diff = phase_diff - 2.0 * np.pi * np.round(phase_diff / (2.0 * np.pi))
+            # True frequency deviation
+            true_freq = self._expected_phase_diff + phase_diff
+
+            # Accumulate phase at new pitch
+            self._sum_phase += true_freq * shift_ratio
+
+            # Pitch-shift by moving frequency bins
+            n_bins = len(magnitude)
+            new_magnitude = np.zeros(n_bins, dtype=np.float64)
+            new_phase = np.zeros(n_bins, dtype=np.float64)
+
+            for k in range(n_bins):
+                new_bin = int(round(k * shift_ratio))
+                if 0 <= new_bin < n_bins:
+                    new_magnitude[new_bin] += magnitude[k]
+                    new_phase[new_bin] = self._sum_phase[k]
+
+            # Resynthesize
+            new_spectrum = new_magnitude * np.exp(1j * new_phase)
+            resynthesized = np.fft.irfft(new_spectrum, n=self.fft_size).astype(np.float32)
+            resynthesized *= self.window
+
+            # Overlap-add into output buffer
+            out_start = pos
+            out_end = min(pos + self.fft_size, len(output))
+            add_len = out_end - out_start
+            if add_len > 0:
+                output[out_start:out_end] += resynthesized[:add_len]
+
+            pos += self.hop_size
+            if pos >= len(audio):
+                break
+
+        # Normalize by overlap factor
+        overlap_factor = self.fft_size / self.hop_size
+        if overlap_factor > 0:
+            output /= (overlap_factor * 0.5)
+
+        return output
+
+    def reset(self) -> None:
+        self._prev_phase[:] = 0
+        self._sum_phase[:] = 0
+
+
 class AudioEngine:
     def __init__(self) -> None:
         self._running = False
         self._thread: Optional[threading.Thread] = None
-        self._monitor_thread: Optional[threading.Thread] = None
         self._amplitude_cb: Optional[Callable[[list[float]], None]] = None
         self._settings: dict = {
             "input_device": None,
@@ -83,8 +182,7 @@ class AudioEngine:
             "output_gain": 0.0,
         }
         self._model = None
-        # Pre-compute anti-alias filter for pitch shifting
-        self._aa_filter: Optional[np.ndarray] = None
+        self._pitch_shifter: Optional[PitchShifter] = None
 
     def set_settings(self, patch: dict) -> None:
         self._settings.update({k: v for k, v in patch.items() if v is not None})
@@ -121,24 +219,25 @@ class AudioEngine:
         output_gain_db = self._settings.get("output_gain", 0.0)
         output_gain_linear = 10 ** (output_gain_db / 20.0)
 
-        # Use device native sample rate (48000 is standard for most devices)
+        # Use standard 48kHz sample rate
         sr = 48000
 
-        # Build anti-alias low-pass filter (cuts at Nyquist/2 to reduce artifacts)
-        if SCIPY_AVAILABLE:
-            try:
-                self._aa_filter = firwin(63, 0.45).astype(np.float32)
-            except Exception:
-                self._aa_filter = None
+        # Create pitch shifter sized for this buffer
+        fft_size = max(2048, buf_size * 4)
+        self._pitch_shifter = PitchShifter(fft_size=fft_size, hop_size=buf_size)
 
-        # Optional monitor stream (hear yourself)
+        # Accumulate input for processing (need at least fft_size samples)
+        input_ring = deque(maxlen=fft_size)
+        for _ in range(fft_size):
+            input_ring.append(0.0)
+
         monitor_queue: list[np.ndarray] = []
 
         def callback(indata: np.ndarray, outdata: np.ndarray, frames: int, time_info, status) -> None:
             audio = indata[:, 0].copy() * input_gain
 
             # Amplitude envelope for waveform display (32 bands)
-            bands = np.array_split(np.abs(audio), 32)
+            bands = np.array_split(np.abs(audio), min(32, len(audio)))
             amplitudes = [float(np.mean(b)) * 4.0 for b in bands]
             if self._amplitude_cb:
                 self._amplitude_cb(amplitudes)
@@ -201,64 +300,33 @@ class AudioEngine:
 
     def _process(self, audio: np.ndarray) -> np.ndarray:
         """
-        Process audio through voice effects and (eventually) RVC model.
-        Pitch shift, formant shift, and noise gate always apply.
+        Process audio through voice effects.
+        Uses a phase vocoder for clean pitch shifting.
         """
-        # ── Noise gate (before everything else) ──────────────────────────
+        # ── Noise gate (smooth envelope follower) ────────────────────────
         if self._settings.get("noise_suppression", True):
-            threshold = 0.005  # -46dB — gentler gate
+            threshold = 0.005
             envelope = np.abs(audio)
             gate = np.where(envelope > threshold, 1.0, envelope / (threshold + 1e-8))
             audio = (audio * gate).astype(np.float32)
 
-        # ── Pitch shift (always active) ──────────────────────────────────
+        # ── Phase-vocoder pitch shift ────────────────────────────────────
         pitch_shift = self._settings.get("pitch_shift", 0)
-        if pitch_shift != 0:
-            factor = 2 ** (pitch_shift / 12.0)
-            if factor != 1.0:
-                try:
-                    orig_len = len(audio)
+        if pitch_shift != 0 and self._pitch_shifter is not None:
+            try:
+                audio = self._pitch_shifter.process(audio, float(pitch_shift))
+            except Exception:
+                pass
 
-                    if SCIPY_AVAILABLE:
-                        # scipy.signal.resample — proper band-limited resampling
-                        new_length = max(2, int(orig_len / factor))
-                        resampled = resample(audio, new_length).astype(np.float32)
-                    else:
-                        # Fallback: numpy interp with anti-alias
-                        new_length = max(2, int(orig_len / factor))
-                        x = np.linspace(0, orig_len - 1, orig_len)
-                        x_new = np.linspace(0, orig_len - 1, new_length)
-                        resampled = np.interp(x_new, x, audio).astype(np.float32)
-
-                    # Anti-alias filter to reduce artifacts
-                    if self._aa_filter is not None and len(resampled) > len(self._aa_filter):
-                        try:
-                            resampled = np.convolve(resampled, self._aa_filter, mode='same').astype(np.float32)
-                        except Exception:
-                            pass
-
-                    # Fit back to original buffer length
-                    if len(resampled) < orig_len:
-                        audio = np.pad(resampled, (0, orig_len - len(resampled)))
-                    else:
-                        audio = resampled[:orig_len]
-                except Exception:
-                    pass
-
-        # ── Formant shift (spectral tilt via pre-emphasis filter) ────────
+        # ── Formant shift (spectral tilt) ────────────────────────────────
         formant_shift = self._settings.get("formant_shift", 0)
         if formant_shift != 0:
             try:
                 alpha = np.clip(formant_shift * 0.015, -0.95, 0.95)
-                if SCIPY_AVAILABLE:
-                    audio = lfilter([1, -alpha], [1], audio).astype(np.float32)
-                else:
-                    # Manual pre-emphasis
-                    out = np.empty_like(audio)
-                    out[0] = audio[0]
-                    for i in range(1, len(audio)):
-                        out[i] = audio[i] - alpha * audio[i - 1]
-                    audio = out
+                out = np.empty_like(audio)
+                out[0] = audio[0]
+                out[1:] = audio[1:] - alpha * audio[:-1]
+                audio = out
             except Exception:
                 pass
 
