@@ -273,8 +273,8 @@ class TestDatabase:
         """Test model CRUD operations"""
         from database import insert_model, get_all_models, delete_model
         import uuid
-        from datetime import datetime
-        
+        from datetime import datetime, timezone
+
         # Create
         test_model = {
             "id": str(uuid.uuid4()),
@@ -284,7 +284,7 @@ class TestDatabase:
             "index_path": None,
             "avatar": "🧪",
             "category": "Test",
-            "added_at": datetime.utcnow().isoformat()
+            "added_at": datetime.now(timezone.utc).isoformat()
         }
         
         await insert_model(test_model)
