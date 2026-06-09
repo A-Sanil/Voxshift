@@ -1251,11 +1251,17 @@ video {
 .pb-5 {
   padding-bottom: 1.25rem;
 }
+.pl-5 {
+  padding-left: 1.25rem;
+}
 .pl-8 {
   padding-left: 2rem;
 }
 .pr-6 {
   padding-right: 1.5rem;
+}
+.pr-\[148px\] {
+  padding-right: 148px;
 }
 .pt-1 {
   padding-top: 0.25rem;

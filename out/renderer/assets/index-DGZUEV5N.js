@@ -7324,7 +7324,12 @@ function useWebSocket() {
             });
             break;
           case "download_complete":
-            clearDownload(data.model_id);
+            setDownloadProgress({
+              model_id: data.model_id,
+              downloaded: 0,
+              total: 0,
+              phase: "done"
+            });
             addModel(data.model);
             addToast({
               type: "success",
@@ -7474,7 +7479,7 @@ function TopBar() {
       await apiFetch("/api/audio/start", { method: "POST" });
     }
   }
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("header", { className: "drag-region flex items-center h-[52px] px-5 border-b border-[rgba(255,255,255,0.05)] bg-canvas shrink-0", children: [
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("header", { className: "drag-region flex items-center h-[52px] pl-5 pr-[148px] border-b border-[rgba(255,255,255,0.05)] bg-canvas shrink-0", children: [
     /* @__PURE__ */ jsxRuntimeExports.jsx("h1", { className: "no-drag flex-1 text-md font-medium text-text-primary", children: TAB_TITLES[activeTab] ?? activeTab }),
     isLive && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "no-drag flex items-center gap-1.5 mr-4 px-2.5 py-1 rounded-full bg-live-dim border border-live/20", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "w-1.5 h-1.5 rounded-full bg-live animate-pulse-live" }),
@@ -7585,7 +7590,16 @@ function BottomBar() {
         /* @__PURE__ */ jsxRuntimeExports.jsxs(
           "button",
           {
-            onClick: () => patchSetting({ monitor_enabled: !settings.monitor_enabled }),
+            onClick: async () => {
+              const newEnabled = !settings.monitor_enabled;
+              const monDev = settings.monitor_device ?? settings.output_device;
+              await patchSetting({ monitor_enabled: newEnabled, monitor_device: monDev });
+              if (isLive) {
+                await apiFetch("/api/audio/stop", { method: "POST" });
+                await new Promise((r2) => setTimeout(r2, 300));
+                await apiFetch("/api/audio/start", { method: "POST" });
+              }
+            },
             title: settings.monitor_enabled ? "Turn off monitor — stop hearing your processed voice" : "Turn on monitor — hear your processed voice in headphones",
             className: [
               "flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-medium transition-all duration-150 shrink-0",
@@ -15099,12 +15113,12 @@ function LiveWaveform() {
   )) });
 }
 const DEFAULT_VOICES = [
-  { id: "default-1", name: "Anime Girl", source_type: "marketplace", file_path: "", index_path: null, avatar: "🌸", category: "Anime", added_at: "2024-01-01T00:00:00" },
-  { id: "default-2", name: "Deep Narrator", source_type: "marketplace", file_path: "", index_path: null, avatar: "🎙️", category: "Masculine", added_at: "2024-01-01T00:00:00" },
-  { id: "default-3", name: "Cyborg", source_type: "marketplace", file_path: "", index_path: null, avatar: "🤖", category: "Robotic", added_at: "2024-01-01T00:00:00" },
-  { id: "default-4", name: "Soft Sage", source_type: "marketplace", file_path: "", index_path: null, avatar: "🍃", category: "Feminine", added_at: "2024-01-01T00:00:00" },
-  { id: "default-5", name: "Villain", source_type: "marketplace", file_path: "", index_path: null, avatar: "😈", category: "Character", added_at: "2024-01-01T00:00:00" },
-  { id: "default-6", name: "High Pitch", source_type: "marketplace", file_path: "", index_path: null, avatar: "🎵", category: "Character", added_at: "2024-01-01T00:00:00" }
+  { id: "default-1", name: "Anime Girl", source_type: "marketplace", file_path: "", index_path: null, avatar: "🌸", category: "Anime", added_at: "2024-01-01T00:00:00", preset_pitch: 12, preset_formant: 8 },
+  { id: "default-2", name: "Deep Narrator", source_type: "marketplace", file_path: "", index_path: null, avatar: "🎙️", category: "Masculine", added_at: "2024-01-01T00:00:00", preset_pitch: -8, preset_formant: -5 },
+  { id: "default-3", name: "Cyborg", source_type: "marketplace", file_path: "", index_path: null, avatar: "🤖", category: "Robotic", added_at: "2024-01-01T00:00:00", preset_pitch: -3, preset_formant: -12 },
+  { id: "default-4", name: "Soft Sage", source_type: "marketplace", file_path: "", index_path: null, avatar: "🍃", category: "Feminine", added_at: "2024-01-01T00:00:00", preset_pitch: 6, preset_formant: 4 },
+  { id: "default-5", name: "Villain", source_type: "marketplace", file_path: "", index_path: null, avatar: "😈", category: "Character", added_at: "2024-01-01T00:00:00", preset_pitch: -12, preset_formant: -8 },
+  { id: "default-6", name: "High Pitch", source_type: "marketplace", file_path: "", index_path: null, avatar: "🎵", category: "Character", added_at: "2024-01-01T00:00:00", preset_pitch: 18, preset_formant: 6 }
 ];
 function VoiceChangerPage() {
   const storeModels = useAppStore((s) => s.models);
@@ -15120,10 +15134,18 @@ function VoiceChangerPage() {
   const allModels = [...DEFAULT_VOICES, ...storeModels];
   async function handleSelectModel(id2) {
     setActiveModelId(id2);
-    updateSettings({ active_model_id: id2 });
+    const preset = DEFAULT_VOICES.find((v2) => v2.id === id2);
+    const patch = { active_model_id: id2 };
+    if (preset) {
+      patch.pitch_shift = preset.preset_pitch;
+      patch.formant_shift = preset.preset_formant;
+      updateSettings({ active_model_id: id2, pitch_shift: preset.preset_pitch, formant_shift: preset.preset_formant });
+    } else {
+      updateSettings({ active_model_id: id2 });
+    }
     await apiFetch("/api/settings", {
       method: "PUT",
-      body: JSON.stringify({ active_model_id: id2 })
+      body: JSON.stringify(patch)
     });
   }
   async function handleDeleteModel(id2) {
@@ -15199,6 +15221,18 @@ function VoiceChangerPage() {
             step: 1,
             format: (v2) => v2 > 0 ? `+${v2}` : String(v2),
             onChange: (v2) => patchSetting("pitch_shift", v2)
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          SliderParam,
+          {
+            label: "Formant shift",
+            value: settings.formant_shift,
+            min: -24,
+            max: 24,
+            step: 1,
+            format: (v2) => v2 > 0 ? `+${v2}` : String(v2),
+            onChange: (v2) => patchSetting("formant_shift", v2)
           }
         ),
         /* @__PURE__ */ jsxRuntimeExports.jsx(
