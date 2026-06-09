@@ -143,6 +143,10 @@ class AudioEngine:
                 outdata[:] = 0
 
         try:
+            # If monitor enabled but no dedicated device, fall back to output device
+            if monitor_enabled and mon_dev is None:
+                mon_dev = out_dev
+
             monitor_stream = None
             if monitor_enabled and mon_dev is not None:
                 monitor_stream = sd.OutputStream(
@@ -194,21 +198,20 @@ class AudioEngine:
         # Apply basic pitch shift as placeholder
         pitch_shift = self._settings.get("pitch_shift", 0)
         if pitch_shift != 0:
-            # Simple pitch shift using scipy (placeholder for real RVC)
-            try:
-                from scipy import signal
-                # Resample to simulate pitch shift
-                factor = 2 ** (pitch_shift / 12.0)
-                if factor != 1.0:
+            # Simple pitch shift using numpy resampling
+            factor = 2 ** (pitch_shift / 12.0)
+            if factor != 1.0:
+                try:
                     new_length = int(len(audio) / factor)
-                    audio = signal.resample(audio, new_length)
-                    # Pad or trim to original length
-                    if len(audio) < len(audio):
-                        audio = np.pad(audio, (0, len(audio) - len(audio)))
+                    x = np.linspace(0, len(audio)-1, len(audio))
+                    x_new = np.linspace(0, len(audio)-1, new_length)
+                    resampled = np.interp(x_new, x, audio).astype(np.float32)
+                    if len(resampled) < len(audio):
+                        audio = np.pad(resampled, (0, len(audio) - len(resampled)))
                     else:
-                        audio = audio[:len(audio)]
-            except Exception:
-                pass
+                        audio = resampled[:len(audio)]
+                except Exception:
+                    pass
         
         # Apply noise gate if enabled
         if self._settings.get("noise_suppression", True):

@@ -31,7 +31,7 @@ export function TopBar(): React.ReactElement {
   }
 
   return (
-    <header className="drag-region flex items-center h-[52px] px-5 border-b border-[rgba(255,255,255,0.05)] bg-canvas shrink-0">
+    <header className="drag-region flex items-center h-[52px] pl-5 pr-[148px] border-b border-[rgba(255,255,255,0.05)] bg-canvas shrink-0">
       <h1 className="no-drag flex-1 text-md font-medium text-text-primary">
         {TAB_TITLES[activeTab] ?? activeTab}
       </h1>

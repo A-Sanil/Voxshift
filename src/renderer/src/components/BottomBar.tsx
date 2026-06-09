@@ -77,7 +77,18 @@ export function BottomBar(): React.ReactElement {
 
       {/* Monitor (hear yourself) */}
       <button
-        onClick={() => patchSetting({ monitor_enabled: !settings.monitor_enabled })}
+        onClick={async () => {
+          const newEnabled = !settings.monitor_enabled
+          // Fall back to output device if no dedicated monitor device is set
+          const monDev = settings.monitor_device ?? settings.output_device
+          await patchSetting({ monitor_enabled: newEnabled, monitor_device: monDev })
+          // Restart engine to pick up the new monitor setting
+          if (isLive) {
+            await apiFetch('/api/audio/stop', { method: 'POST' })
+            await new Promise((r) => setTimeout(r, 300))
+            await apiFetch('/api/audio/start', { method: 'POST' })
+          }
+        }}
         title={settings.monitor_enabled ? 'Turn off monitor — stop hearing your processed voice' : 'Turn on monitor — hear your processed voice in headphones'}
         className={[
           'flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-medium transition-all duration-150 shrink-0',
