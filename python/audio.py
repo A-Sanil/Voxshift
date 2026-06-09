@@ -20,6 +20,12 @@ try:
 except Exception:
     TORCH_AVAILABLE = False
 
+try:
+    from scipy.signal import resample, lfilter, firwin
+    SCIPY_AVAILABLE = True
+except Exception:
+    SCIPY_AVAILABLE = False
+
 
 def list_input_devices() -> list[dict]:
     if not SD_AVAILABLE:
@@ -77,6 +83,8 @@ class AudioEngine:
             "output_gain": 0.0,
         }
         self._model = None
+        # Pre-compute anti-alias filter for pitch shifting
+        self._aa_filter: Optional[np.ndarray] = None
 
     def set_settings(self, patch: dict) -> None:
         self._settings.update({k: v for k, v in patch.items() if v is not None})
@@ -112,7 +120,16 @@ class AudioEngine:
         input_gain = self._settings.get("input_gain", 100.0) / 100.0
         output_gain_db = self._settings.get("output_gain", 0.0)
         output_gain_linear = 10 ** (output_gain_db / 20.0)
-        sr = 40000
+
+        # Use device native sample rate (48000 is standard for most devices)
+        sr = 48000
+
+        # Build anti-alias low-pass filter (cuts at Nyquist/2 to reduce artifacts)
+        if SCIPY_AVAILABLE:
+            try:
+                self._aa_filter = firwin(63, 0.45).astype(np.float32)
+            except Exception:
+                self._aa_filter = None
 
         # Optional monitor stream (hear yourself)
         monitor_queue: list[np.ndarray] = []
@@ -127,6 +144,10 @@ class AudioEngine:
                 self._amplitude_cb(amplitudes)
 
             processed = self._process(audio) * output_gain_linear
+
+            # Soft-clip to prevent digital distortion
+            processed = np.tanh(processed).astype(np.float32)
+
             outdata[:] = processed.reshape(-1, 1)
 
             if monitor_enabled:
@@ -181,13 +202,14 @@ class AudioEngine:
     def _process(self, audio: np.ndarray) -> np.ndarray:
         """
         Process audio through voice effects and (eventually) RVC model.
-        Pitch shift and noise gate always apply — RVC model inference is
-        layered on top when a model is loaded.
+        Pitch shift, formant shift, and noise gate always apply.
         """
         # ── Noise gate (before everything else) ──────────────────────────
         if self._settings.get("noise_suppression", True):
-            threshold = 0.01  # -40dB
-            audio = np.where(np.abs(audio) > threshold, audio, 0)
+            threshold = 0.005  # -46dB — gentler gate
+            envelope = np.abs(audio)
+            gate = np.where(envelope > threshold, 1.0, envelope / (threshold + 1e-8))
+            audio = (audio * gate).astype(np.float32)
 
         # ── Pitch shift (always active) ──────────────────────────────────
         pitch_shift = self._settings.get("pitch_shift", 0)
@@ -196,34 +218,52 @@ class AudioEngine:
             if factor != 1.0:
                 try:
                     orig_len = len(audio)
-                    new_length = int(orig_len / factor)
-                    if new_length > 1:
+
+                    if SCIPY_AVAILABLE:
+                        # scipy.signal.resample — proper band-limited resampling
+                        new_length = max(2, int(orig_len / factor))
+                        resampled = resample(audio, new_length).astype(np.float32)
+                    else:
+                        # Fallback: numpy interp with anti-alias
+                        new_length = max(2, int(orig_len / factor))
                         x = np.linspace(0, orig_len - 1, orig_len)
                         x_new = np.linspace(0, orig_len - 1, new_length)
                         resampled = np.interp(x_new, x, audio).astype(np.float32)
-                        if len(resampled) < orig_len:
-                            audio = np.pad(resampled, (0, orig_len - len(resampled)))
-                        else:
-                            audio = resampled[:orig_len]
+
+                    # Anti-alias filter to reduce artifacts
+                    if self._aa_filter is not None and len(resampled) > len(self._aa_filter):
+                        try:
+                            resampled = np.convolve(resampled, self._aa_filter, mode='same').astype(np.float32)
+                        except Exception:
+                            pass
+
+                    # Fit back to original buffer length
+                    if len(resampled) < orig_len:
+                        audio = np.pad(resampled, (0, orig_len - len(resampled)))
+                    else:
+                        audio = resampled[:orig_len]
                 except Exception:
                     pass
 
-        # ── Formant shift (simple spectral tilt) ─────────────────────────
+        # ── Formant shift (spectral tilt via pre-emphasis filter) ────────
         formant_shift = self._settings.get("formant_shift", 0)
         if formant_shift != 0:
             try:
-                from scipy.signal import lfilter
-                alpha = np.clip(formant_shift * 0.01, -0.95, 0.95)
-                audio = lfilter([1, -alpha], [1], audio).astype(np.float32)
+                alpha = np.clip(formant_shift * 0.015, -0.95, 0.95)
+                if SCIPY_AVAILABLE:
+                    audio = lfilter([1, -alpha], [1], audio).astype(np.float32)
+                else:
+                    # Manual pre-emphasis
+                    out = np.empty_like(audio)
+                    out[0] = audio[0]
+                    for i in range(1, len(audio)):
+                        out[i] = audio[i] - alpha * audio[i - 1]
+                    audio = out
             except Exception:
                 pass
 
         # ── RVC model inference (when available) ─────────────────────────
         # TODO: Integrate actual RVC inference here
-        # 1. Extract pitch using RMVPE/Harvest/Dio
-        # 2. Extract features using HuBERT
-        # 3. Apply voice conversion using loaded model
-        # 4. Use FAISS index for feature matching
 
         return audio
 
