@@ -1,6 +1,7 @@
 import React from 'react'
 import { useAppStore } from '../store/appStore'
 import type { NavTab } from '../types'
+import logoSrc from '../assets/logo.jpg'
 
 interface NavItem {
   id: NavTab
@@ -62,17 +63,17 @@ export function Sidebar(): React.ReactElement {
   return (
     <aside className="flex flex-col w-[200px] min-w-[200px] h-full bg-surface border-r border-[rgba(255,255,255,0.05)] pt-2 pb-4">
       {/* Logo */}
-      <div className="px-5 pb-6 pt-1">
-        <div className="flex items-center gap-2.5">
-          <div className="w-7 h-7 rounded-lg bg-accent flex items-center justify-center shadow-accent">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="white">
-              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
-              <path d="M19 10v2a7 7 0 0 1-14 0v-2" stroke="white" strokeWidth="2" fill="none" strokeLinecap="round" />
-              <line x1="12" y1="19" x2="12" y2="23" stroke="white" strokeWidth="2" strokeLinecap="round" />
-            </svg>
-          </div>
-          <span className="font-semibold text-md text-text-primary tracking-tight">VoxShift</span>
+      <div className="px-4 pb-5 pt-2 flex items-center gap-2.5">
+        {/* Crop to the V icon mark only, hide the white bg + text portion */}
+        <div className="shrink-0 w-9 h-9 rounded-xl overflow-hidden">
+          <img
+            src={logoSrc}
+            alt=""
+            className="w-[200%] max-w-none h-auto object-cover block"
+            style={{ marginLeft: '-50%', marginTop: '-4%' }}
+          />
         </div>
+        <span className="font-semibold text-sm text-text-primary tracking-tight">VoxShift</span>
       </div>
 
       {/* Nav items */}
