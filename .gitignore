@@ -1,0 +1,17 @@
+node_modules/
+dist/
+dist-electron/
+release/
+.env
+.env.local
+*.log
+python/__pycache__/
+python/*.pyc
+python/venv/
+python/.venv/
+python/models/
+python/output/
+python/logs/
+*.pth
+*.index
+resources/icon.*

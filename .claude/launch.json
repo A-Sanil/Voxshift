@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "voxshift-renderer",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["serve", "out/renderer", "--single", "-p", "5174", "--no-clipboard"],
+      "port": 5174
+    }
+  ]
+}
