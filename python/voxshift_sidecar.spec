@@ -7,12 +7,23 @@ from pathlib import Path
 
 block_cipher = None
 
+from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
+
+# Collect entire packages that PyInstaller routinely misses
+bs4_datas, bs4_binaries, bs4_hiddenimports = collect_all('bs4')
+lxml_datas, lxml_binaries, lxml_hiddenimports = collect_all('lxml')
+httpx_datas, httpx_binaries, httpx_hiddenimports = collect_all('httpx')
+anyio_datas, anyio_binaries, anyio_hiddenimports = collect_all('anyio')
+gdown_datas, gdown_binaries, gdown_hiddenimports = collect_all('gdown')
+scipy_datas, scipy_binaries, scipy_hiddenimports = collect_all('scipy')
+
 a = Analysis(
     ['main.py'],
     pathex=[str(Path('.').resolve())],
-    binaries=[],
-    datas=[],
-    hiddenimports=[
+    binaries=[] + lxml_binaries + bs4_binaries + httpx_binaries + anyio_binaries + gdown_binaries + scipy_binaries,
+    datas=[] + bs4_datas + lxml_datas + httpx_datas + anyio_datas + gdown_datas + scipy_datas,
+    hiddenimports=(
+        bs4_hiddenimports + lxml_hiddenimports + httpx_hiddenimports + anyio_hiddenimports + gdown_hiddenimports + scipy_hiddenimports + [
         # FastAPI / uvicorn internals
         'uvicorn.logging',
         'uvicorn.loops',
@@ -47,7 +58,7 @@ a = Analysis(
         # DB
         'aiosqlite',
         'sqlite3',
-    ],
+    ]),
     excludes=[
         # Exclude heavy ML deps — models are loaded at runtime, not bundled
         # Remove these if you want to bundle torch (adds ~3 GB)

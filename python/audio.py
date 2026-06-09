@@ -180,44 +180,51 @@ class AudioEngine:
 
     def _process(self, audio: np.ndarray) -> np.ndarray:
         """
-        Process audio through RVC model.
-        Currently a stub - real RVC inference will be integrated here.
-        
-        TODO: Integrate actual RVC inference:
-        1. Extract pitch using RMVPE/Harvest/Dio
-        2. Extract features using HuBERT
-        3. Apply voice conversion using loaded model
-        4. Use FAISS index for feature matching
-        5. Apply pitch shift and formant shift
-        6. Vocoder synthesis
+        Process audio through voice effects and (eventually) RVC model.
+        Pitch shift and noise gate always apply — RVC model inference is
+        layered on top when a model is loaded.
         """
-        if self._model is None:
-            # No model loaded - pass through
-            return audio
-        
-        # Apply basic pitch shift as placeholder
-        pitch_shift = self._settings.get("pitch_shift", 0)
-        if pitch_shift != 0:
-            # Simple pitch shift using numpy resampling
-            factor = 2 ** (pitch_shift / 12.0)
-            if factor != 1.0:
-                try:
-                    new_length = int(len(audio) / factor)
-                    x = np.linspace(0, len(audio)-1, len(audio))
-                    x_new = np.linspace(0, len(audio)-1, new_length)
-                    resampled = np.interp(x_new, x, audio).astype(np.float32)
-                    if len(resampled) < len(audio):
-                        audio = np.pad(resampled, (0, len(audio) - len(resampled)))
-                    else:
-                        audio = resampled[:len(audio)]
-                except Exception:
-                    pass
-        
-        # Apply noise gate if enabled
+        # ── Noise gate (before everything else) ──────────────────────────
         if self._settings.get("noise_suppression", True):
             threshold = 0.01  # -40dB
             audio = np.where(np.abs(audio) > threshold, audio, 0)
-        
+
+        # ── Pitch shift (always active) ──────────────────────────────────
+        pitch_shift = self._settings.get("pitch_shift", 0)
+        if pitch_shift != 0:
+            factor = 2 ** (pitch_shift / 12.0)
+            if factor != 1.0:
+                try:
+                    orig_len = len(audio)
+                    new_length = int(orig_len / factor)
+                    if new_length > 1:
+                        x = np.linspace(0, orig_len - 1, orig_len)
+                        x_new = np.linspace(0, orig_len - 1, new_length)
+                        resampled = np.interp(x_new, x, audio).astype(np.float32)
+                        if len(resampled) < orig_len:
+                            audio = np.pad(resampled, (0, orig_len - len(resampled)))
+                        else:
+                            audio = resampled[:orig_len]
+                except Exception:
+                    pass
+
+        # ── Formant shift (simple spectral tilt) ─────────────────────────
+        formant_shift = self._settings.get("formant_shift", 0)
+        if formant_shift != 0:
+            try:
+                from scipy.signal import lfilter
+                alpha = np.clip(formant_shift * 0.01, -0.95, 0.95)
+                audio = lfilter([1, -alpha], [1], audio).astype(np.float32)
+            except Exception:
+                pass
+
+        # ── RVC model inference (when available) ─────────────────────────
+        # TODO: Integrate actual RVC inference here
+        # 1. Extract pitch using RMVPE/Harvest/Dio
+        # 2. Extract features using HuBERT
+        # 3. Apply voice conversion using loaded model
+        # 4. Use FAISS index for feature matching
+
         return audio
 
     @property

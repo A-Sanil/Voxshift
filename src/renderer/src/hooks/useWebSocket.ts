@@ -54,7 +54,12 @@ export function useWebSocket(): void {
             })
             break
           case 'download_complete':
-            clearDownload(data.model_id)
+            setDownloadProgress({
+              model_id: data.model_id,
+              downloaded: 0,
+              total: 0,
+              phase: 'done',
+            })
             addModel(data.model)
             addToast({
               type: 'success',

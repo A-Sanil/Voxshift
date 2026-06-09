@@ -5,13 +5,19 @@ import { VoiceCard, ImportCard } from '../components/VoiceCard'
 import { LiveWaveform } from '../components/LiveWaveform'
 import type { VoiceModel } from '../types'
 
-const DEFAULT_VOICES: VoiceModel[] = [
-  { id: 'default-1', name: 'Anime Girl',   source_type: 'marketplace', file_path: '', index_path: null, avatar: '🌸', category: 'Anime',     added_at: '2024-01-01T00:00:00' },
-  { id: 'default-2', name: 'Deep Narrator', source_type: 'marketplace', file_path: '', index_path: null, avatar: '🎙️', category: 'Masculine',  added_at: '2024-01-01T00:00:00' },
-  { id: 'default-3', name: 'Cyborg',        source_type: 'marketplace', file_path: '', index_path: null, avatar: '🤖', category: 'Robotic',    added_at: '2024-01-01T00:00:00' },
-  { id: 'default-4', name: 'Soft Sage',     source_type: 'marketplace', file_path: '', index_path: null, avatar: '🍃', category: 'Feminine',   added_at: '2024-01-01T00:00:00' },
-  { id: 'default-5', name: 'Villain',       source_type: 'marketplace', file_path: '', index_path: null, avatar: '😈', category: 'Character',  added_at: '2024-01-01T00:00:00' },
-  { id: 'default-6', name: 'High Pitch',    source_type: 'marketplace', file_path: '', index_path: null, avatar: '🎵', category: 'Character',  added_at: '2024-01-01T00:00:00' },
+// Each default voice preset maps to specific pitch/formant settings applied on selection
+interface VoicePreset extends VoiceModel {
+  preset_pitch: number
+  preset_formant: number
+}
+
+const DEFAULT_VOICES: VoicePreset[] = [
+  { id: 'default-1', name: 'Anime Girl',    source_type: 'marketplace', file_path: '', index_path: null, avatar: '🌸', category: 'Anime',     added_at: '2024-01-01T00:00:00', preset_pitch: 12,  preset_formant: 8 },
+  { id: 'default-2', name: 'Deep Narrator', source_type: 'marketplace', file_path: '', index_path: null, avatar: '🎙️', category: 'Masculine',  added_at: '2024-01-01T00:00:00', preset_pitch: -8,  preset_formant: -5 },
+  { id: 'default-3', name: 'Cyborg',        source_type: 'marketplace', file_path: '', index_path: null, avatar: '🤖', category: 'Robotic',    added_at: '2024-01-01T00:00:00', preset_pitch: -3,  preset_formant: -12 },
+  { id: 'default-4', name: 'Soft Sage',     source_type: 'marketplace', file_path: '', index_path: null, avatar: '🍃', category: 'Feminine',   added_at: '2024-01-01T00:00:00', preset_pitch: 6,   preset_formant: 4 },
+  { id: 'default-5', name: 'Villain',       source_type: 'marketplace', file_path: '', index_path: null, avatar: '😈', category: 'Character',  added_at: '2024-01-01T00:00:00', preset_pitch: -12, preset_formant: -8 },
+  { id: 'default-6', name: 'High Pitch',    source_type: 'marketplace', file_path: '', index_path: null, avatar: '🎵', category: 'Character',  added_at: '2024-01-01T00:00:00', preset_pitch: 18,  preset_formant: 6 },
 ]
 
 export function VoiceChangerPage(): React.ReactElement {
@@ -31,10 +37,19 @@ export function VoiceChangerPage(): React.ReactElement {
 
   async function handleSelectModel(id: string): Promise<void> {
     setActiveModelId(id)
-    updateSettings({ active_model_id: id })
+    // If this is a default voice preset, apply its pitch/formant settings
+    const preset = DEFAULT_VOICES.find((v) => v.id === id)
+    const patch: Record<string, unknown> = { active_model_id: id }
+    if (preset) {
+      patch.pitch_shift = preset.preset_pitch
+      patch.formant_shift = preset.preset_formant
+      updateSettings({ active_model_id: id, pitch_shift: preset.preset_pitch, formant_shift: preset.preset_formant })
+    } else {
+      updateSettings({ active_model_id: id })
+    }
     await apiFetch('/api/settings', {
       method: 'PUT',
-      body: JSON.stringify({ active_model_id: id })
+      body: JSON.stringify(patch),
     })
   }
 
@@ -123,6 +138,16 @@ export function VoiceChangerPage(): React.ReactElement {
             step={1}
             format={(v) => (v > 0 ? `+${v}` : String(v))}
             onChange={(v) => patchSetting('pitch_shift', v)}
+          />
+
+          <SliderParam
+            label="Formant shift"
+            value={settings.formant_shift}
+            min={-24}
+            max={24}
+            step={1}
+            format={(v) => (v > 0 ? `+${v}` : String(v))}
+            onChange={(v) => patchSetting('formant_shift', v)}
           />
 
           <SliderParam
