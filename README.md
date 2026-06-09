@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://raw.githubusercontent.com/A-Sanil/Voxshift/main/resources/banner.png" alt="VoxShift" width="100%" />
+<img src="./src/renderer/src/assets/logo.jpg" alt="VoxShift" width="200" />
 
 # VoxShift
 

@@ -3,6 +3,7 @@ import asyncio
 import threading
 import time
 import random
+import numpy as np
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
@@ -31,35 +32,152 @@ def detect_hardware() -> dict:
 
 
 class ModelLoader:
+    """
+    Loads and manages RVC voice conversion models.
+    
+    TODO: Implement full RVC model loading:
+    1. Load .pth checkpoint (contains model weights)
+    2. Load .index file (FAISS index for feature matching)
+    3. Initialize HuBERT feature extractor
+    4. Initialize pitch extractor (RMVPE/Harvest/Dio)
+    5. Initialize vocoder (NSF-HiFiGAN)
+    """
+    
     def __init__(self) -> None:
         self._loaded_id: Optional[str] = None
         self._model = None
+        self._index = None
+        self._hubert = None
+        self._pitch_extractor = None
+        self._vocoder = None
 
-    def load(self, model_id: str, file_path: str) -> bool:
+    def load(self, model_id: str, file_path: str, index_path: Optional[str] = None) -> bool:
+        """
+        Load an RVC model from disk.
+        
+        Args:
+            model_id: Unique identifier for the model
+            file_path: Path to .pth model file
+            index_path: Optional path to .index FAISS file
+            
+        Returns:
+            True if loaded successfully, False otherwise
+        """
         if self._loaded_id == model_id:
             return True
+        
         self._unload()
+        
         if not Path(file_path).exists():
+            print(f"[model] File not found: {file_path}")
             return False
-        # Stub: real torch.load + model initialization goes here
-        self._loaded_id = model_id
-        return True
+        
+        try:
+            if TORCH_AVAILABLE:
+                import torch
+                
+                # Load model checkpoint
+                checkpoint = torch.load(file_path, map_location=DEVICE)
+                print(f"[model] Loaded checkpoint from {file_path}")
+                
+                # TODO: Initialize RVC model architecture
+                # self._model = RVCModel(checkpoint['config'])
+                # self._model.load_state_dict(checkpoint['model'])
+                # self._model.to(DEVICE)
+                # self._model.eval()
+                
+                # Load FAISS index if provided
+                if index_path and Path(index_path).exists():
+                    try:
+                        import faiss
+                        self._index = faiss.read_index(index_path)
+                        print(f"[model] Loaded FAISS index from {index_path}")
+                    except Exception as e:
+                        print(f"[model] Failed to load index: {e}")
+                
+                # TODO: Load HuBERT, pitch extractor, vocoder
+                # self._hubert = load_hubert_model()
+                # self._pitch_extractor = load_pitch_extractor()
+                # self._vocoder = load_vocoder()
+                
+                self._loaded_id = model_id
+                print(f"[model] Model {model_id} loaded successfully")
+                return True
+            else:
+                print("[model] PyTorch not available")
+                return False
+                
+        except Exception as e:
+            print(f"[model] Failed to load model: {e}")
+            self._unload()
+            return False
 
     def _unload(self) -> None:
+        """Unload current model and free memory"""
         if self._model is not None:
             del self._model
             self._model = None
-            if TORCH_AVAILABLE:
-                try:
-                    import torch
+        
+        if self._index is not None:
+            del self._index
+            self._index = None
+        
+        if self._hubert is not None:
+            del self._hubert
+            self._hubert = None
+        
+        if self._pitch_extractor is not None:
+            del self._pitch_extractor
+            self._pitch_extractor = None
+        
+        if self._vocoder is not None:
+            del self._vocoder
+            self._vocoder = None
+        
+        if TORCH_AVAILABLE:
+            try:
+                import torch
+                if DEVICE == "cuda":
                     torch.cuda.empty_cache()
-                except Exception:
-                    pass
+                elif DEVICE == "mps":
+                    torch.mps.empty_cache()
+            except Exception:
+                pass
+        
         self._loaded_id = None
+        print("[model] Model unloaded")
+    
+    def infer(self, audio: 'np.ndarray', pitch_shift: int = 0, index_ratio: float = 0.75) -> 'np.ndarray':
+        """
+        Perform voice conversion inference.
+        
+        Args:
+            audio: Input audio array
+            pitch_shift: Semitones to shift pitch
+            index_ratio: Feature matching ratio (0-1)
+            
+        Returns:
+            Converted audio array
+        """
+        if self._model is None:
+            return audio
+        
+        # TODO: Implement full RVC inference pipeline
+        # 1. Extract pitch
+        # 2. Extract HuBERT features
+        # 3. Match features using FAISS index
+        # 4. Apply voice conversion
+        # 5. Synthesize with vocoder
+        
+        return audio
 
     @property
     def loaded_id(self) -> Optional[str]:
         return self._loaded_id
+    
+    @property
+    def is_loaded(self) -> bool:
+        return self._model is not None
 
 
 class TrainingRunner:

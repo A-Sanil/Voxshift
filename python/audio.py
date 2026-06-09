@@ -175,7 +175,46 @@ class AudioEngine:
             self._running = False
 
     def _process(self, audio: np.ndarray) -> np.ndarray:
-        # Stub: pass-through. Real RVC inference goes here.
+        """
+        Process audio through RVC model.
+        Currently a stub - real RVC inference will be integrated here.
+        
+        TODO: Integrate actual RVC inference:
+        1. Extract pitch using RMVPE/Harvest/Dio
+        2. Extract features using HuBERT
+        3. Apply voice conversion using loaded model
+        4. Use FAISS index for feature matching
+        5. Apply pitch shift and formant shift
+        6. Vocoder synthesis
+        """
+        if self._model is None:
+            # No model loaded - pass through
+            return audio
+        
+        # Apply basic pitch shift as placeholder
+        pitch_shift = self._settings.get("pitch_shift", 0)
+        if pitch_shift != 0:
+            # Simple pitch shift using scipy (placeholder for real RVC)
+            try:
+                from scipy import signal
+                # Resample to simulate pitch shift
+                factor = 2 ** (pitch_shift / 12.0)
+                if factor != 1.0:
+                    new_length = int(len(audio) / factor)
+                    audio = signal.resample(audio, new_length)
+                    # Pad or trim to original length
+                    if len(audio) < len(audio):
+                        audio = np.pad(audio, (0, len(audio) - len(audio)))
+                    else:
+                        audio = audio[:len(audio)]
+            except Exception:
+                pass
+        
+        # Apply noise gate if enabled
+        if self._settings.get("noise_suppression", True):
+            threshold = 0.01  # -40dB
+            audio = np.where(np.abs(audio) > threshold, audio, 0)
+        
         return audio
 
     @property
