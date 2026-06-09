@@ -7,8 +7,12 @@ export function useWebSocket(): void {
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const mounted = useRef(true)
 
-  const { sidecarPort, sidecarReady, setAudioStatus, setWaveformAmplitudes, updateTrainingJob } =
-    useAppStore()
+  const {
+    sidecarPort, sidecarReady,
+    setAudioStatus, setWaveformAmplitudes, updateTrainingJob,
+    addModel, addToast, setActiveTab,
+    setDownloadProgress, clearDownload,
+  } = useAppStore()
 
   const connect = useCallback(() => {
     if (!mounted.current || !sidecarReady) return
@@ -41,6 +45,32 @@ export function useWebSocket(): void {
               status: data.status
             })
             break
+          case 'download_progress':
+            setDownloadProgress({
+              model_id: data.model_id,
+              downloaded: data.downloaded,
+              total: data.total,
+              phase: data.phase as import('../types').DownloadPhase,
+            })
+            break
+          case 'download_complete':
+            clearDownload(data.model_id)
+            addModel(data.model)
+            addToast({
+              type: 'success',
+              message: `${data.model.name} added to My models`,
+              action: { label: 'View', onClick: () => setActiveTab('voice-changer') },
+            })
+            break
+          case 'download_error':
+            setDownloadProgress({
+              model_id: data.model_id,
+              downloaded: 0,
+              total: 0,
+              phase: 'error',
+            })
+            addToast({ type: 'error', message: `Download failed: ${data.error}` })
+            break
         }
       } catch {
         // ignore malformed frames
@@ -57,7 +87,8 @@ export function useWebSocket(): void {
     socket.onerror = () => {
       socket.close()
     }
-  }, [sidecarPort, sidecarReady, setAudioStatus, setWaveformAmplitudes, updateTrainingJob])
+  }, [sidecarPort, sidecarReady, setAudioStatus, setWaveformAmplitudes, updateTrainingJob,
+      addModel, addToast, setActiveTab, setDownloadProgress, clearDownload])
 
   useEffect(() => {
     mounted.current = true

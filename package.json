@@ -45,9 +45,14 @@
     ],
     "extraResources": [
       {
+        "from": "python/dist/voxshift_sidecar",
+        "to": "sidecar",
+        "filter": ["**/*"]
+      },
+      {
         "from": "python",
         "to": "python",
-        "filter": ["**/*"]
+        "filter": ["**/*.py", "requirements.txt"]
       }
     ],
     "win": {

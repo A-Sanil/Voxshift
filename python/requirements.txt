@@ -3,6 +3,10 @@ uvicorn[standard]==0.30.1
 websockets==12.0
 aiosqlite==0.20.0
 pydantic==2.7.3
+httpx==0.27.0
+beautifulsoup4==4.12.3
+lxml==5.2.2
+gdown==5.2.0
 sounddevice==0.4.7
 numpy==1.26.4
 scipy==1.13.1

@@ -7,7 +7,8 @@ import type {
   AudioStatus,
   TrainingJob,
   Toast,
-  WaveformFrame
+  WaveformFrame,
+  DownloadEntry
 } from '../types'
 
 interface AppState {
@@ -57,6 +58,11 @@ interface AppState {
   toasts: Toast[]
   addToast: (toast: Omit<Toast, 'id'>) => void
   removeToast: (id: string) => void
+
+  // active downloads (model_id → progress)
+  activeDownloads: Record<string, DownloadEntry>
+  setDownloadProgress: (entry: DownloadEntry) => void
+  clearDownload: (model_id: string) => void
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -122,5 +128,15 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((s) => ({ toasts: [...s.toasts, full] }))
     setTimeout(() => get().removeToast(id), 4000)
   },
-  removeToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }))
+  removeToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
+
+  activeDownloads: {},
+  setDownloadProgress: (entry) =>
+    set((s) => ({ activeDownloads: { ...s.activeDownloads, [entry.model_id]: entry } })),
+  clearDownload: (model_id) =>
+    set((s) => {
+      const next = { ...s.activeDownloads }
+      delete next[model_id]
+      return { activeDownloads: next }
+    }),
 }))

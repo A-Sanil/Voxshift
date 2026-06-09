@@ -2,11 +2,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import time
+import threading
 import uvicorn
 from contextlib import asynccontextmanager
 from typing import Optional
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 
 from database import (
@@ -19,15 +19,17 @@ from schemas import (
 )
 from audio import AudioEngine, list_input_devices, list_output_devices
 from inference import ModelLoader, TrainingRunner, detect_hardware
+from scraper import scrape_models
+from downloader import download_model
 
-# ── State ────────────────────────────────────────────────────────────────────
+# ── Singletons ────────────────────────────────────────────────────────────────
 
 audio_engine = AudioEngine()
 model_loader = ModelLoader()
 ws_clients: set[WebSocket] = set()
 _training_runner: Optional[TrainingRunner] = None
 _active_job: Optional[dict] = None
-
+_active_downloads: dict[str, dict] = {}  # model_id → progress
 
 # ── WebSocket broadcast ───────────────────────────────────────────────────────
 
@@ -41,24 +43,19 @@ async def broadcast(event: dict) -> None:
     ws_clients.difference_update(dead)
 
 
-# ── Waveform pump (runs in background) ───────────────────────────────────────
+def broadcast_sync(event: dict) -> None:
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.run_coroutine_threadsafe(broadcast(event), loop)
+    except RuntimeError:
+        pass
 
-async def waveform_pump() -> None:
-    import math, random
-    t = 0.0
-    while True:
-        await asyncio.sleep(1 / 30)
-        if audio_engine.is_running:
-            # Engine sets amplitudes via callback; pump last known values
-            pass
-        t += 0.1
 
+# ── Amplitude callback ────────────────────────────────────────────────────────
 
 def amplitude_cb(amplitudes: list[float]) -> None:
-    asyncio.run_coroutine_threadsafe(
-        broadcast({"type": "waveform", "amplitudes": amplitudes}),
-        asyncio.get_event_loop()
-    )
+    broadcast_sync({"type": "waveform", "amplitudes": amplitudes})
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
@@ -79,7 +76,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
-    allow_headers=["*"]
+    allow_headers=["*"],
 )
 
 
@@ -90,14 +87,14 @@ async def health():
     return {"status": "ok"}
 
 
-# ── Models ────────────────────────────────────────────────────────────────────
+# ── Models (local library) ────────────────────────────────────────────────────
 
-@app.get("/api/models", response_model=list[VoiceModel])
+@app.get("/api/models")
 async def get_models():
     return await get_all_models()
 
 
-@app.post("/api/models", response_model=VoiceModel, status_code=201)
+@app.post("/api/models", status_code=201)
 async def create_model(req: CreateModelRequest):
     model = VoiceModel(
         name=req.name,
@@ -105,7 +102,7 @@ async def create_model(req: CreateModelRequest):
         file_path=req.file_path,
         index_path=req.index_path,
         avatar=req.avatar,
-        category=req.category
+        category=req.category,
     )
     await insert_model(model.model_dump())
     return model
@@ -118,30 +115,28 @@ async def remove_model(model_id: str):
 
 # ── Devices ───────────────────────────────────────────────────────────────────
 
-@app.get("/api/devices", response_model=DevicesResponse)
+@app.get("/api/devices")
 async def get_devices():
     return DevicesResponse(
         input=[AudioDevice(**d) for d in list_input_devices()],
-        output=[AudioDevice(**d) for d in list_output_devices()]
+        output=[AudioDevice(**d) for d in list_output_devices()],
     )
 
 
 # ── Settings ──────────────────────────────────────────────────────────────────
 
-@app.get("/api/settings", response_model=AppSettings)
+@app.get("/api/settings")
 async def get_settings():
     stored = await get_all_settings()
-    defaults = AppSettings()
-    return AppSettings(**{**defaults.model_dump(), **stored})
+    return AppSettings(**{**AppSettings().model_dump(), **stored})
 
 
-@app.put("/api/settings", response_model=AppSettings)
+@app.put("/api/settings")
 async def update_settings(patch: AppSettingsPatch):
     data = patch.model_dump(exclude_none=True)
     for k, v in data.items():
         await set_setting(k, v)
     audio_engine.set_settings(data)
-
     stored = await get_all_settings()
     return AppSettings(**{**AppSettings().model_dump(), **stored})
 
@@ -150,10 +145,8 @@ async def update_settings(patch: AppSettingsPatch):
 
 @app.post("/api/audio/start")
 async def start_audio():
-    global _active_job
     if _active_job and _active_job.get("status") == "running":
-        raise HTTPException(400, "Training is running; pause it before activating voice changer")
-
+        raise HTTPException(400, "Training is running — stop it first")
     ok = audio_engine.start()
     status = "live" if ok else "error"
     await broadcast({"type": "audio_status", "status": status})
@@ -169,23 +162,16 @@ async def stop_audio():
 
 # ── Training ──────────────────────────────────────────────────────────────────
 
-@app.post("/api/train", response_model=TrainingJob, status_code=201)
+@app.post("/api/train", status_code=201)
 async def start_training(req: TrainRequest):
     global _training_runner, _active_job
-
     audio_engine.stop()
     await broadcast({"type": "audio_status", "status": "idle"})
-
-    job = TrainingJob(
-        model_name=req.model_name,
-        total_epochs=req.total_epochs
-    )
+    job = TrainingJob(model_name=req.model_name, total_epochs=req.total_epochs)
     _active_job = job.model_dump()
     await upsert_training_job(_active_job)
-
     _training_runner = TrainingRunner(broadcast)
     _training_runner.start(_active_job, req.file_paths)
-
     return job
 
 
@@ -200,6 +186,101 @@ async def cancel_training(job_id: str):
     return {"status": "cancelled"}
 
 
+# ── Marketplace ───────────────────────────────────────────────────────────────
+
+@app.get("/api/marketplace")
+async def marketplace(
+    page: int = 1,
+    search: str = "",
+    sort: str = "new",
+    category: str = "All",
+):
+    """Proxy voice-models.com with 5-minute cache."""
+    try:
+        result = await scrape_models(page=page, search=search, sort=sort, category=category)
+        return result
+    except Exception as e:
+        raise HTTPException(502, f"Failed to fetch marketplace: {e}")
+
+
+@app.post("/api/marketplace/download")
+async def start_download(body: dict, background_tasks: BackgroundTasks):
+    """
+    Begin downloading a marketplace model in the background.
+    Broadcasts progress via WebSocket as:
+      {type: "download_progress", model_id, downloaded, total, phase}
+    """
+    model_id: str = body.get("id", "")
+    model_name: str = body.get("name", "Unknown Voice")
+    download_url: str = body.get("download_url", "")
+    download_type: str = body.get("download_type", "direct")
+    avatar: str = body.get("avatar", "🎤")
+    category: str = body.get("category", "Character")
+
+    if not download_url:
+        raise HTTPException(400, "download_url is required")
+
+    if model_id in _active_downloads:
+        return {"status": "already_downloading"}
+
+    _active_downloads[model_id] = {"phase": "starting", "downloaded": 0, "total": 0}
+
+    async def _run():
+        def _progress(info: dict):
+            _active_downloads[model_id] = info
+            broadcast_sync({
+                "type": "download_progress",
+                "model_id": model_id,
+                **info,
+            })
+
+        try:
+            result = await download_model(
+                model_id=model_id,
+                model_name=model_name,
+                download_url=download_url,
+                download_type=download_type,
+                progress_cb=_progress,
+            )
+            # Register in local library
+            from database import insert_model as _insert
+            import uuid
+            from datetime import datetime
+            new_model = {
+                "id": str(uuid.uuid4()),
+                "name": model_name,
+                "source_type": "marketplace",
+                "file_path": result.get("pth_path") or "",
+                "index_path": result.get("index_path"),
+                "avatar": avatar,
+                "category": category,
+                "added_at": datetime.utcnow().isoformat(),
+            }
+            await _insert(new_model)
+            broadcast_sync({
+                "type": "download_complete",
+                "model_id": model_id,
+                "model": new_model,
+            })
+        except Exception as e:
+            broadcast_sync({
+                "type": "download_error",
+                "model_id": model_id,
+                "error": str(e),
+            })
+        finally:
+            _active_downloads.pop(model_id, None)
+
+    background_tasks.add_task(_run)
+    return {"status": "started"}
+
+
+@app.delete("/api/cache", status_code=204)
+async def clear_cache():
+    from scraper import _cache
+    _cache.clear()
+
+
 # ── WebSocket ─────────────────────────────────────────────────────────────────
 
 @app.websocket("/ws")
@@ -208,12 +289,9 @@ async def websocket_endpoint(ws: WebSocket):
     ws_clients.add(ws)
     try:
         while True:
-            # Keep connection alive; all pushes are server-initiated
             await asyncio.sleep(5)
             await ws.send_text(json.dumps({"type": "ping"}))
-    except WebSocketDisconnect:
-        pass
-    except Exception:
+    except (WebSocketDisconnect, Exception):
         pass
     finally:
         ws_clients.discard(ws)
@@ -226,5 +304,4 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--host", default="127.0.0.1")
     args = parser.parse_args()
-
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")

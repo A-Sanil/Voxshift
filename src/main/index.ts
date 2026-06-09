@@ -9,25 +9,38 @@ let sidecarProcess: ChildProcess | null = null
 
 const SIDECAR_PORT = 8765
 
-function getSidecarPath(): string {
-  if (is.dev) {
-    return join(__dirname, '../../python/main.py')
-  }
-  const bundledPath = join(process.resourcesPath, 'python', 'main.py')
-  return bundledPath
-}
-
 function spawnSidecar(): void {
-  const sidecarPath = getSidecarPath()
+  let cmd: string
+  let args: string[]
 
-  if (!existsSync(sidecarPath)) {
-    console.warn('Python sidecar not found at', sidecarPath)
-    return
+  if (is.dev) {
+    // Dev: run raw Python script
+    const scriptPath = join(__dirname, '../../python/main.py')
+    if (!existsSync(scriptPath)) {
+      console.warn('[sidecar] python/main.py not found')
+      return
+    }
+    cmd = process.platform === 'win32' ? 'python' : 'python3'
+    args = [scriptPath, '--port', String(SIDECAR_PORT)]
+  } else {
+    // Production: prefer compiled PyInstaller binary, fall back to script
+    const binaryName = process.platform === 'win32' ? 'voxshift_sidecar.exe' : 'voxshift_sidecar'
+    const binaryPath = join(process.resourcesPath, 'sidecar', binaryName)
+    const scriptPath = join(process.resourcesPath, 'python', 'main.py')
+
+    if (existsSync(binaryPath)) {
+      cmd = binaryPath
+      args = ['--port', String(SIDECAR_PORT)]
+    } else if (existsSync(scriptPath)) {
+      cmd = process.platform === 'win32' ? 'python' : 'python3'
+      args = [scriptPath, '--port', String(SIDECAR_PORT)]
+    } else {
+      console.warn('[sidecar] No sidecar binary or script found')
+      return
+    }
   }
 
-  const pythonExe = process.platform === 'win32' ? 'python' : 'python3'
-
-  sidecarProcess = spawn(pythonExe, [sidecarPath, '--port', String(SIDECAR_PORT)], {
+  sidecarProcess = spawn(cmd, args, {
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: false
   })

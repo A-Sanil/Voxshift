@@ -78,7 +78,42 @@ export interface AudioStatusEvent {
   message?: string
 }
 
-export type WsEvent = TrainingProgressEvent | WaveformEvent | AudioStatusEvent
+export interface DownloadProgressEvent {
+  type: 'download_progress'
+  model_id: string
+  downloaded: number
+  total: number
+  phase: string
+}
+
+export interface DownloadCompleteEvent {
+  type: 'download_complete'
+  model_id: string
+  model: VoiceModel
+}
+
+export interface DownloadErrorEvent {
+  type: 'download_error'
+  model_id: string
+  error: string
+}
+
+export type WsEvent =
+  | TrainingProgressEvent
+  | WaveformEvent
+  | AudioStatusEvent
+  | DownloadProgressEvent
+  | DownloadCompleteEvent
+  | DownloadErrorEvent
+
+export type DownloadPhase = 'starting' | 'downloading' | 'extracting' | 'done' | 'error'
+
+export interface DownloadEntry {
+  model_id: string
+  downloaded: number
+  total: number
+  phase: DownloadPhase
+}
 
 export interface MarketplaceVoice {
   id: string
