@@ -1,12 +1,17 @@
+"""
+VoxShift audio engine — real-time voice conversion.
+
+Uses the WORLD vocoder (pyworld) for high-quality pitch/timbre
+manipulation that properly separates pitch from spectral envelope.
+This gives dramatically better results than simple resampling or
+phase-vocoder pitch shifting.
+"""
 from __future__ import annotations
 import threading
 import time
 import numpy as np
-from typing import Optional, Callable, TYPE_CHECKING
+from typing import Optional, Callable
 from collections import deque
-
-if TYPE_CHECKING:
-    pass
 
 try:
     import sounddevice as sd
@@ -15,10 +20,16 @@ except Exception:
     SD_AVAILABLE = False
 
 try:
-    import torch
-    TORCH_AVAILABLE = True
+    import pyworld as pw
+    PYWORLD_AVAILABLE = True
 except Exception:
-    TORCH_AVAILABLE = False
+    PYWORLD_AVAILABLE = False
+
+try:
+    from scipy.signal import resample_poly
+    SCIPY_AVAILABLE = True
+except Exception:
+    SCIPY_AVAILABLE = False
 
 
 def list_input_devices() -> list[dict]:
@@ -57,111 +68,127 @@ def list_output_devices() -> list[dict]:
     return devices
 
 
-# ── Phase vocoder pitch shifter ──────────────────────────────────────────────
+# ── WORLD vocoder voice converter ────────────────────────────────────────────
 
-class PitchShifter:
+class WorldVoiceConverter:
     """
-    Real-time phase-vocoder pitch shifter using overlap-add.
-    Much cleaner than resampling — no chipmunk/rasping artifacts.
+    Real-time voice conversion using the WORLD vocoder.
+
+    WORLD decomposes audio into three components:
+      - F0 (fundamental frequency / pitch)
+      - Spectral envelope (timbre / voice character)
+      - Aperiodicity (breathiness / noise)
+
+    By modifying F0 and the spectral envelope independently,
+    we can change pitch without chipmunk effects and alter
+    voice timbre to sound like a different person.
     """
 
-    def __init__(self, fft_size: int = 2048, hop_size: int = 512) -> None:
-        self.fft_size = fft_size
-        self.hop_size = hop_size
-        self.window = np.hanning(fft_size).astype(np.float32)
-        self._in_buf = np.zeros(fft_size, dtype=np.float32)
-        self._out_buf = np.zeros(fft_size * 2, dtype=np.float32)
-        self._out_pos = 0
-        self._prev_phase = np.zeros(fft_size // 2 + 1, dtype=np.float64)
-        self._sum_phase = np.zeros(fft_size // 2 + 1, dtype=np.float64)
-        self._expected_phase_diff = 2.0 * np.pi * hop_size / fft_size * np.arange(fft_size // 2 + 1)
+    def __init__(self, sr: int = 48000) -> None:
+        self.sr = sr
+        # Accumulation buffer for WORLD (needs ~50ms+ of audio)
+        self._buf = np.zeros(0, dtype=np.float64)
+        self._min_samples = int(sr * 0.06)  # 60ms minimum for analysis
 
-    def process(self, audio: np.ndarray, semitones: float) -> np.ndarray:
-        """Pitch-shift a buffer of audio by the given number of semitones."""
-        if semitones == 0:
+    def process(
+        self,
+        audio: np.ndarray,
+        pitch_shift: float = 0,
+        formant_shift: float = 0,
+    ) -> np.ndarray:
+        """
+        Convert voice using WORLD vocoder analysis/synthesis.
+
+        pitch_shift:  semitones (-24 to +24)
+        formant_shift: semitones (-24 to +24) — shifts spectral envelope
+        """
+        if not PYWORLD_AVAILABLE:
             return audio
 
-        shift_ratio = 2.0 ** (semitones / 12.0)
-        output = np.zeros(len(audio), dtype=np.float32)
-        pos = 0
+        orig_len = len(audio)
 
-        while pos + self.fft_size <= len(audio) + self.fft_size:
-            # Fill input buffer
-            chunk_start = pos - self.fft_size + self.hop_size
-            if chunk_start < 0:
-                frame = np.zeros(self.fft_size, dtype=np.float32)
-                valid_start = max(0, chunk_start + self.fft_size - self.hop_size)
-                copy_len = min(len(audio) - max(0, chunk_start), self.fft_size)
-                src_start = max(0, chunk_start)
-                if src_start < len(audio) and copy_len > 0:
-                    actual = min(copy_len, len(audio) - src_start, self.fft_size)
-                    frame[self.fft_size - actual:] = audio[src_start:src_start + actual]
+        # Accumulate audio for WORLD (needs longer frames than typical buffers)
+        self._buf = np.concatenate([self._buf, audio.astype(np.float64)])
+
+        if len(self._buf) < self._min_samples:
+            return audio  # not enough data yet, pass through
+
+        # Take what we have and process
+        work = self._buf.copy()
+        self._buf = np.zeros(0, dtype=np.float64)
+
+        try:
+            # ── WORLD analysis ───────────────────────────────────────
+            # DIO: fast pitch extraction
+            f0, t = pw.dio(work, self.sr, frame_period=5.0)
+            f0 = pw.stonemask(work, f0, t, self.sr)  # refine pitch
+
+            # CheapTrick: spectral envelope extraction
+            sp = pw.cheaptrick(work, f0, t, self.sr)
+
+            # D4C: aperiodicity extraction
+            ap = pw.d4c(work, f0, t, self.sr)
+
+            # ── Pitch modification ───────────────────────────────────
+            if pitch_shift != 0:
+                ratio = 2.0 ** (pitch_shift / 12.0)
+                f0_modified = f0.copy()
+                voiced = f0_modified > 0
+                f0_modified[voiced] *= ratio
+                # Clamp to reasonable range
+                f0_modified = np.clip(f0_modified, 0, 1200)
             else:
-                end = min(chunk_start + self.fft_size, len(audio))
-                if end - chunk_start < self.fft_size:
-                    frame = np.zeros(self.fft_size, dtype=np.float32)
-                    frame[:end - chunk_start] = audio[chunk_start:end]
-                else:
-                    frame = audio[chunk_start:end].copy()
+                f0_modified = f0
 
-            # Window and FFT
-            windowed = frame * self.window
-            spectrum = np.fft.rfft(windowed)
-            magnitude = np.abs(spectrum)
-            phase = np.angle(spectrum)
+            # ── Formant / timbre modification ────────────────────────
+            if formant_shift != 0:
+                shift_ratio = 2.0 ** (formant_shift / 12.0)
+                sp_modified = _shift_spectral_envelope(sp, shift_ratio)
+            else:
+                sp_modified = sp
 
-            # Phase difference
-            phase_diff = phase - self._prev_phase
-            self._prev_phase = phase.copy()
+            # ── WORLD synthesis ──────────────────────────────────────
+            result = pw.synthesize(f0_modified, sp_modified, ap, self.sr, frame_period=5.0)
+            result = result.astype(np.float32)
 
-            # Subtract expected phase advance
-            phase_diff -= self._expected_phase_diff
-            # Wrap to [-pi, pi]
-            phase_diff = phase_diff - 2.0 * np.pi * np.round(phase_diff / (2.0 * np.pi))
-            # True frequency deviation
-            true_freq = self._expected_phase_diff + phase_diff
+            # Match output length to input length
+            if len(result) >= orig_len:
+                return result[:orig_len]
+            else:
+                out = np.zeros(orig_len, dtype=np.float32)
+                out[:len(result)] = result
+                return out
 
-            # Accumulate phase at new pitch
-            self._sum_phase += true_freq * shift_ratio
-
-            # Pitch-shift by moving frequency bins
-            n_bins = len(magnitude)
-            new_magnitude = np.zeros(n_bins, dtype=np.float64)
-            new_phase = np.zeros(n_bins, dtype=np.float64)
-
-            for k in range(n_bins):
-                new_bin = int(round(k * shift_ratio))
-                if 0 <= new_bin < n_bins:
-                    new_magnitude[new_bin] += magnitude[k]
-                    new_phase[new_bin] = self._sum_phase[k]
-
-            # Resynthesize
-            new_spectrum = new_magnitude * np.exp(1j * new_phase)
-            resynthesized = np.fft.irfft(new_spectrum, n=self.fft_size).astype(np.float32)
-            resynthesized *= self.window
-
-            # Overlap-add into output buffer
-            out_start = pos
-            out_end = min(pos + self.fft_size, len(output))
-            add_len = out_end - out_start
-            if add_len > 0:
-                output[out_start:out_end] += resynthesized[:add_len]
-
-            pos += self.hop_size
-            if pos >= len(audio):
-                break
-
-        # Normalize by overlap factor
-        overlap_factor = self.fft_size / self.hop_size
-        if overlap_factor > 0:
-            output /= (overlap_factor * 0.5)
-
-        return output
+        except Exception as e:
+            # On any error, pass through original audio
+            return audio[:orig_len].astype(np.float32)
 
     def reset(self) -> None:
-        self._prev_phase[:] = 0
-        self._sum_phase[:] = 0
+        self._buf = np.zeros(0, dtype=np.float64)
 
+
+def _shift_spectral_envelope(sp: np.ndarray, ratio: float) -> np.ndarray:
+    """
+    Shift the spectral envelope to change voice timbre/formants.
+
+    ratio > 1: shift formants up (sounds more feminine / younger)
+    ratio < 1: shift formants down (sounds more masculine / deeper)
+    """
+    n_frames, n_freq = sp.shape
+    sp_shifted = np.zeros_like(sp)
+
+    for i in range(n_frames):
+        for j in range(n_freq):
+            src_bin = int(j / ratio)
+            if 0 <= src_bin < n_freq:
+                sp_shifted[i, j] = sp[i, src_bin]
+            else:
+                sp_shifted[i, j] = sp[i, -1]  # repeat last bin
+
+    return sp_shifted
+
+
+# ── Audio engine ─────────────────────────────────────────────────────────────
 
 class AudioEngine:
     def __init__(self) -> None:
@@ -182,7 +209,7 @@ class AudioEngine:
             "output_gain": 0.0,
         }
         self._model = None
-        self._pitch_shifter: Optional[PitchShifter] = None
+        self._converter: Optional[WorldVoiceConverter] = None
 
     def set_settings(self, patch: dict) -> None:
         self._settings.update({k: v for k, v in patch.items() if v is not None})
@@ -219,17 +246,15 @@ class AudioEngine:
         output_gain_db = self._settings.get("output_gain", 0.0)
         output_gain_linear = 10 ** (output_gain_db / 20.0)
 
-        # Use standard 48kHz sample rate
+        # Standard 48kHz sample rate
         sr = 48000
 
-        # Create pitch shifter sized for this buffer
-        fft_size = max(2048, buf_size * 4)
-        self._pitch_shifter = PitchShifter(fft_size=fft_size, hop_size=buf_size)
+        # Use large buffer for WORLD processing (needs 50ms+ chunks)
+        # Override small buffers — WORLD can't work on 256 samples
+        effective_buf = max(buf_size, 2048)
 
-        # Accumulate input for processing (need at least fft_size samples)
-        input_ring = deque(maxlen=fft_size)
-        for _ in range(fft_size):
-            input_ring.append(0.0)
+        # Create WORLD voice converter
+        self._converter = WorldVoiceConverter(sr=sr)
 
         monitor_queue: list[np.ndarray] = []
 
@@ -237,7 +262,8 @@ class AudioEngine:
             audio = indata[:, 0].copy() * input_gain
 
             # Amplitude envelope for waveform display (32 bands)
-            bands = np.array_split(np.abs(audio), min(32, len(audio)))
+            n_bands = min(32, max(1, len(audio)))
+            bands = np.array_split(np.abs(audio), n_bands)
             amplitudes = [float(np.mean(b)) * 4.0 for b in bands]
             if self._amplitude_cb:
                 self._amplitude_cb(amplitudes)
@@ -272,7 +298,7 @@ class AudioEngine:
                 monitor_stream = sd.OutputStream(
                     device=mon_dev,
                     samplerate=sr,
-                    blocksize=buf_size,
+                    blocksize=effective_buf,
                     dtype="float32",
                     channels=1,
                     callback=monitor_callback
@@ -281,7 +307,7 @@ class AudioEngine:
             with sd.Stream(
                 device=(in_dev, out_dev),
                 samplerate=sr,
-                blocksize=buf_size,
+                blocksize=effective_buf,
                 dtype="float32",
                 channels=1,
                 callback=callback
@@ -300,38 +326,28 @@ class AudioEngine:
 
     def _process(self, audio: np.ndarray) -> np.ndarray:
         """
-        Process audio through voice effects.
-        Uses a phase vocoder for clean pitch shifting.
+        Process audio through WORLD vocoder voice conversion.
         """
-        # ── Noise gate (smooth envelope follower) ────────────────────────
+        # ── Noise gate ───────────────────────────────────────────────
         if self._settings.get("noise_suppression", True):
             threshold = 0.005
             envelope = np.abs(audio)
             gate = np.where(envelope > threshold, 1.0, envelope / (threshold + 1e-8))
             audio = (audio * gate).astype(np.float32)
 
-        # ── Phase-vocoder pitch shift ────────────────────────────────────
+        # ── WORLD voice conversion ───────────────────────────────────
         pitch_shift = self._settings.get("pitch_shift", 0)
-        if pitch_shift != 0 and self._pitch_shifter is not None:
-            try:
-                audio = self._pitch_shifter.process(audio, float(pitch_shift))
-            except Exception:
-                pass
-
-        # ── Formant shift (spectral tilt) ────────────────────────────────
         formant_shift = self._settings.get("formant_shift", 0)
-        if formant_shift != 0:
+
+        if (pitch_shift != 0 or formant_shift != 0) and self._converter is not None:
             try:
-                alpha = np.clip(formant_shift * 0.015, -0.95, 0.95)
-                out = np.empty_like(audio)
-                out[0] = audio[0]
-                out[1:] = audio[1:] - alpha * audio[:-1]
-                audio = out
+                audio = self._converter.process(
+                    audio,
+                    pitch_shift=float(pitch_shift),
+                    formant_shift=float(formant_shift),
+                )
             except Exception:
                 pass
-
-        # ── RVC model inference (when available) ─────────────────────────
-        # TODO: Integrate actual RVC inference here
 
         return audio
 

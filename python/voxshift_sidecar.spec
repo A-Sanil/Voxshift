@@ -16,14 +16,15 @@ httpx_datas, httpx_binaries, httpx_hiddenimports = collect_all('httpx')
 anyio_datas, anyio_binaries, anyio_hiddenimports = collect_all('anyio')
 gdown_datas, gdown_binaries, gdown_hiddenimports = collect_all('gdown')
 scipy_datas, scipy_binaries, scipy_hiddenimports = collect_all('scipy')
+pyworld_datas, pyworld_binaries, pyworld_hiddenimports = collect_all('pyworld')
 
 a = Analysis(
     ['main.py'],
     pathex=[str(Path('.').resolve())],
-    binaries=[] + lxml_binaries + bs4_binaries + httpx_binaries + anyio_binaries + gdown_binaries + scipy_binaries,
-    datas=[] + bs4_datas + lxml_datas + httpx_datas + anyio_datas + gdown_datas + scipy_datas,
+    binaries=[] + lxml_binaries + bs4_binaries + httpx_binaries + anyio_binaries + gdown_binaries + scipy_binaries + pyworld_binaries,
+    datas=[] + bs4_datas + lxml_datas + httpx_datas + anyio_datas + gdown_datas + scipy_datas + pyworld_datas,
     hiddenimports=(
-        bs4_hiddenimports + lxml_hiddenimports + httpx_hiddenimports + anyio_hiddenimports + gdown_hiddenimports + scipy_hiddenimports + [
+        bs4_hiddenimports + lxml_hiddenimports + httpx_hiddenimports + anyio_hiddenimports + gdown_hiddenimports + scipy_hiddenimports + pyworld_hiddenimports + [
         # FastAPI / uvicorn internals
         'uvicorn.logging',
         'uvicorn.loops',
